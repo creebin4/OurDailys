@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Prevent any scrolling at the document level */
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom animations that Tailwind doesn't provide out of the box */
+@keyframes shake {
+  0% { transform: translateX(0); }
+  15% { transform: translateX(-6px); }
+  30% { transform: translateX(6px); }
+  45% { transform: translateX(-4px); }
+  60% { transform: translateX(4px); }
+  75% { transform: translateX(-2px); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes flipDown {
+  0% { transform: scaleY(1); }
+  50% { transform: scaleY(0); }
+  100% { transform: scaleY(1); }
+}
+
+.animate-shake {
+  animation: shake 0.4s ease;
+}
+
+.animate-flip {
+  animation: flipDown 0.5s ease-in-out forwards;
+}
