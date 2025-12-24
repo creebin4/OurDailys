@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import validWordsText from "./assets/valid-wordle-words.txt?raw";
+import { fetchWordleAnswer, WordleData } from "./wordleApi";
 
-const TARGET_WORD = "WHITE";
+const FALLBACK_WORD = "WHITE";
 const NUM_ROWS = 6;
 const NUM_COLS = 5;
 type LetterStatus = "" | "absent" | "present" | "correct";
+const DEFAULT_HELP_TEXT = "Type a five-letter guess, then press Enter.";
 
 const createEmptyGrid = () =>
   Array.from({ length: NUM_ROWS }, () => Array(NUM_COLS).fill(""));
@@ -71,8 +73,11 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
   const [revealRow, setRevealRow] = useState<number | null>(null);
   const [revealStep, setRevealStep] = useState(0);
   const [isRevealingRow, setIsRevealingRow] = useState(false);
-
-  const target = TARGET_WORD.toUpperCase();
+  const [targetWord, setTargetWord] = useState(FALLBACK_WORD.toUpperCase());
+  const targetWordRef = useRef(targetWord);
+  const [answerMeta, setAnswerMeta] = useState<WordleData | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
 
   const messageTimeout = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
@@ -89,13 +94,89 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
   );
 
   useEffect(() => {
-    flashMessage("Type a five-letter guess, then press Enter.");
     return () => {
       if (messageTimeout.current) {
         window.clearTimeout(messageTimeout.current);
       }
     };
-  }, [flashMessage]);
+  }, []);
+
+  useEffect(() => {
+    targetWordRef.current = targetWord;
+  }, [targetWord]);
+
+  const rebuildGameForWord = useCallback(
+    (nextTarget: string, toast: string = DEFAULT_HELP_TEXT) => {
+      const normalized = nextTarget.trim().toUpperCase();
+      if (normalized.length !== NUM_COLS || /[^A-Z]/.test(normalized)) {
+        return;
+      }
+
+      setBoard(createEmptyGrid());
+      setStatuses(createEmptyStatusGrid());
+      setCurrentRow(0);
+      setCurrentCol(0);
+      setGameState("playing");
+      setInvalidRow(null);
+      setRevealedColumns(Array(NUM_ROWS).fill(-1));
+      setRevealRow(null);
+      setRevealStep(0);
+      setIsRevealingRow(false);
+      setTargetWord((prev) => (prev === normalized ? prev : normalized));
+      flashMessage(toast);
+    },
+    [flashMessage]
+  );
+
+  useEffect(() => {
+    rebuildGameForWord(targetWordRef.current);
+  }, [rebuildGameForWord]);
+
+  const applyFetchedAnswer = useCallback(
+    (data: WordleData) => {
+      const normalized = data.word.trim().toUpperCase();
+      if (!/^[A-Z]{5}$/.test(normalized)) {
+        throw new Error("Received invalid Wordle answer");
+      }
+
+      setAnswerMeta(data);
+      setLastSyncedAt(new Date());
+      setSyncError(null);
+
+      if (targetWordRef.current !== normalized) {
+        rebuildGameForWord(normalized, "Today's Wordle synced!");
+      }
+    },
+    [rebuildGameForWord]
+  );
+
+  const syncWord = useCallback(async () => {
+    try {
+      const data = await fetchWordleAnswer();
+      applyFetchedAnswer(data);
+    } catch (err) {
+      const messageText =
+        typeof err === "string"
+          ? err
+          : err instanceof Error
+            ? err.message
+            : "Failed to fetch Wordle answer";
+      console.error("Failed to sync Wordle answer", err);
+      setSyncError(messageText);
+      flashMessage("Unable to sync today's Wordle right now.");
+    }
+  }, [applyFetchedAnswer, flashMessage]);
+
+  useEffect(() => {
+    void syncWord();
+  }, [syncWord]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void syncWord();
+    }, 12 * 60 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [syncWord]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -135,7 +216,7 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
           setInvalidRow(currentRow);
           return;
         }
-        const evaluation = evaluateGuess(guess, target);
+        const evaluation = evaluateGuess(guess, targetWordRef.current);
         setStatuses((prev) => {
           const clone = prev.map((row) => [...row]);
           clone[rowToReveal] = evaluation;
@@ -150,15 +231,15 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
         setRevealStep(0);
         setIsRevealingRow(true);
 
-        if (guess === target) {
+        if (guess === targetWordRef.current) {
           setGameState("won");
-          flashMessage("✨ You guessed WHITE! ✨");
+          flashMessage(`✨ You guessed ${targetWordRef.current}! ✨`);
           return;
         }
 
         if (currentRow === NUM_ROWS - 1) {
           setGameState("lost");
-          flashMessage(`Out of guesses. The word was ${target}.`);
+          flashMessage(`Out of guesses. The word was ${targetWordRef.current}.`);
           return;
         }
 
@@ -190,7 +271,7 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
     currentCol,
     currentRow,
     gameState,
-    target,
+    targetWord,
     flashMessage,
     isRevealingRow,
   ]);
@@ -240,24 +321,30 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
     };
   }, [revealRow, revealStep]);
 
-  const resetGame = () => {
-    setBoard(createEmptyGrid());
-    setStatuses(createEmptyStatusGrid());
-    setCurrentRow(0);
-    setCurrentCol(0);
-    setGameState("playing");
-    setInvalidRow(null);
-    setRevealedColumns(Array(NUM_ROWS).fill(-1));
-    setRevealRow(null);
-    setRevealStep(0);
-    setIsRevealingRow(false);
-    flashMessage("Type a five-letter guess, then press Enter.");
-  };
+  const puzzleDateLabel = answerMeta
+    ? (() => {
+        const parsed = new Date(answerMeta.date);
+        return Number.isNaN(parsed.getTime())
+          ? null
+          : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      })()
+    : null;
+
+  const lastSyncedLabel = lastSyncedAt
+    ? lastSyncedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : null;
 
   return (
     <>
       <header className="text-center shrink-0">
         <h1 className="text-[clamp(1.25rem,4vh,2.5rem)] font-bold tracking-wide">Mini Wordle</h1>
+        {answerMeta && (
+          <p className="text-slate-400 text-[clamp(0.75rem,2vh,1rem)] mt-1">
+            {answerMeta.puzzle}
+            {puzzleDateLabel && <span className="px-2 text-slate-600">•</span>}
+            {puzzleDateLabel}
+          </p>
+        )}
       </header>
 
       {/* Message bubble */}
@@ -307,15 +394,8 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
       </section>
 
       {/* Controls */}
-      <div className="flex flex-col items-center gap-[1vh] shrink-0">
-        <div className="flex gap-[2vw]">
-          <button
-            className="px-[3vw] py-[1vh] rounded-full bg-blue-600 hover:bg-blue-500 active:scale-95 font-semibold text-white shadow-lg transition-all duration-150 text-[clamp(0.75rem,2vh,1rem)]"
-            type="button"
-            onClick={resetGame}
-          >
-            Restart
-          </button>
+      <div className="flex flex-col items-center gap-[1vh] shrink-0 w-full">
+        <div className="flex flex-wrap justify-center gap-[1vw]">
           <button
             className="px-[3vw] py-[1vh] rounded-full bg-violet-600 hover:bg-violet-500 active:scale-95 font-semibold text-white shadow-lg transition-all duration-150 text-[clamp(0.75rem,2vh,1rem)]"
             type="button"
@@ -324,9 +404,13 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
             Play Sudoku
           </button>
         </div>
-        <p className="text-slate-400 text-[clamp(0.6rem,1.5vh,0.875rem)]">
-          Type letters, Backspace to delete, Enter to submit.
-        </p>
+        <div className="flex flex-col items-center gap-1 text-slate-400 text-center text-[clamp(0.6rem,1.5vh,0.875rem)]">
+          <p>Type letters, Backspace to delete, Enter to submit.</p>
+          <div className="flex flex-col">
+            {lastSyncedLabel && <span>Last synced at {lastSyncedLabel}</span>}
+            {syncError && <span className="text-red-300">Sync error: {syncError}</span>}
+          </div>
+        </div>
       </div>
     </>
   );

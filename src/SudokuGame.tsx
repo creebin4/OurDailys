@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchSudokuPuzzle } from "./sudokuApi";
 
 // Types
 type InputMode = "value" | "possible" | "pointing";
@@ -29,6 +30,10 @@ const SAMPLE_PUZZLE = [
   [0, 0, 0, 0, 8, 0, 0, 7, 9],
 ];
 
+const computePuzzleKey = (grid: number[][]): string =>
+  grid.map((row) => row.join(""))
+    .join("|");
+
 const createBoard = (puzzle: number[][]): Board => {
   return puzzle.map((row) =>
     row.map((val) => ({
@@ -56,17 +61,27 @@ const parseKey = (key: string): { row: number; col: number } => {
 // Mode cycle order
 const MODE_ORDER: InputMode[] = ["value", "possible", "pointing"];
 
+const SYNC_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
 export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
   const [board, setBoard] = useState<Board>(() => createBoard(SAMPLE_PUZZLE));
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
   const [inputMode, setInputMode] = useState<InputMode>("value");
   const [isDragging, setIsDragging] = useState(false);
+  const [puzzleInfo, setPuzzleInfo] = useState<{ displayDate: string; difficulty: string } | null>(null);
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [solutionGrid, setSolutionGrid] = useState<number[][] | null>(null);
+  const [isCompleted, setIsCompleted] = useState(false);
 
   // Timer state
   const [elapsedTime, setElapsedTime] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const syncInFlightRef = useRef(false);
+  const puzzleKeyRef = useRef<string | null>(null);
 
   // Timer effect
   useEffect(() => {
@@ -99,13 +114,70 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
   }, []);
 
   const toggleTimer = () => {
+    if (isCompleted) return;
     setIsTimerRunning((prev) => !prev);
   };
 
-  const resetTimer = () => {
-    setIsTimerRunning(false);
-    setElapsedTime(0);
-  };
+  const syncSudoku = useCallback(async () => {
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    setIsSyncing(true);
+    setSyncError(null);
+
+    try {
+      const data = await fetchSudokuPuzzle();
+      const nextPuzzleKey = computePuzzleKey(data.puzzle);
+      const isNewPuzzle = puzzleKeyRef.current !== nextPuzzleKey;
+
+      setPuzzleInfo({
+        displayDate: data.displayDate || data.printDate,
+        difficulty: data.difficulty,
+      });
+      setSolutionGrid(data.solution);
+      puzzleKeyRef.current = nextPuzzleKey;
+
+      if (isNewPuzzle) {
+        setBoard(createBoard(data.puzzle));
+        setSelectedCells(new Set());
+        setSelectedNumber(null);
+        setIsTimerRunning(false);
+        setElapsedTime(0);
+        setIsCompleted(false);
+      }
+
+      const now = new Date();
+      setLastSyncTime(
+        now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+          ? error
+          : "Failed to sync Sudoku puzzle.";
+      setSyncError(message);
+      console.error("Sudoku sync failed:", error);
+    } finally {
+      syncInFlightRef.current = false;
+      setIsSyncing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void syncSudoku();
+    const interval = setInterval(() => {
+      void syncSudoku();
+    }, SYNC_INTERVAL_MS);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [syncSudoku]);
+
+  const handleRetrySync = useCallback(() => {
+    void syncSudoku();
+  }, [syncSudoku]);
 
   // Cycle input mode
   const cycleInputMode = useCallback(() => {
@@ -158,6 +230,21 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
   }, [board]);
 
   const invalidCells = getInvalidCells();
+
+  useEffect(() => {
+    if (!solutionGrid || isCompleted) {
+      return;
+    }
+
+    const solved = board.every((row, rowIndex) =>
+      row.every((cell, colIndex) => cell.value !== null && cell.value === solutionGrid[rowIndex][colIndex])
+    );
+
+    if (solved) {
+      setIsCompleted(true);
+      setIsTimerRunning(false);
+    }
+  }, [board, solutionGrid, isCompleted]);
 
   // Get the "primary" selected cell (first one, for highlighting row/col/box)
   const primaryCell = selectedCells.size > 0 ? parseKey([...selectedCells][0]) : null;
@@ -315,27 +402,6 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
     if (selectedCells.size > 0) {
       handleCellInput(num);
     }
-  };
-
-  // Clear board (reset non-given cells) and reset timer
-  const clearBoard = () => {
-    setBoard((prev) =>
-      prev.map((row) =>
-        row.map((cell) =>
-          cell.isGiven
-            ? cell
-            : {
-                ...cell,
-                value: null,
-                possibleNotes: new Set<number>(),
-                pointingNotes: new Set<number>(),
-              }
-        )
-      )
-    );
-    setSelectedCells(new Set());
-    setSelectedNumber(null);
-    resetTimer();
   };
 
   // Mouse handlers for drag selection
@@ -573,10 +639,33 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
     );
   };
 
+  const syncStatusMessage = isSyncing
+    ? "Syncing latest hard puzzle..."
+    : syncError
+    ? `Sync failed: ${syncError}`
+    : lastSyncTime
+    ? `Last sync ${lastSyncTime}`
+    : "Waiting for first sync...";
+
   return (
     <>
       <header className="text-center shrink-0 flex flex-col items-center gap-[1vh]">
         <h1 className="text-[clamp(1.25rem,4vh,2.5rem)] font-bold tracking-wide">Sudoku</h1>
+        <p className="text-slate-300 text-[clamp(0.75rem,2vh,1rem)] font-semibold">
+          {puzzleInfo ? `${puzzleInfo.difficulty} • ${puzzleInfo.displayDate}` : "Sample hard puzzle"}
+        </p>
+        <div className="flex items-center gap-3 text-[clamp(0.55rem,1.4vh,0.75rem)] text-slate-400">
+          <span className="text-center max-w-[55vw]">{syncStatusMessage}</span>
+          {syncError && (
+            <button
+              onClick={handleRetrySync}
+              disabled={isSyncing}
+              className="underline text-slate-200 disabled:opacity-50 disabled:no-underline"
+            >
+              Retry
+            </button>
+          )}
+        </div>
         
         {/* Timer */}
         <div className="flex items-center gap-[1.5vw]">
@@ -585,13 +674,15 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
           </span>
           <button
             onClick={toggleTimer}
+            type="button"
+            disabled={isCompleted}
             className={`px-[1.5vw] py-[0.5vh] rounded-lg font-semibold text-[clamp(0.65rem,1.5vh,0.85rem)] transition-all duration-150 ${
               isTimerRunning
                 ? "bg-amber-600 hover:bg-amber-500 text-white"
                 : "bg-green-600 hover:bg-green-500 text-white"
-            }`}
+            } ${isCompleted ? "opacity-60 cursor-not-allowed" : ""}`}
           >
-            {isTimerRunning ? "Pause" : "Start"}
+            {isCompleted ? "Completed" : isTimerRunning ? "Pause" : "Start"}
           </button>
         </div>
       </header>
@@ -673,23 +764,37 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
           </div>
 
           {/* Pause/Start overlay */}
-          {!isTimerRunning && (
+          {(!isTimerRunning || isCompleted) && (
             <div 
               className="absolute inset-0 backdrop-blur-sm flex flex-col items-center justify-center gap-[3vh] rounded-lg"
               style={{ backgroundColor: "rgba(30, 41, 59, 0.95)" }}
             >
-              <div className="text-[clamp(1.5rem,5vh,3rem)] font-bold text-slate-200">
-                {elapsedTime === 0 ? "🧩" : "⏸️"}
-              </div>
-              <p className="text-[clamp(0.9rem,2.5vh,1.25rem)] text-slate-300 font-medium">
-                {elapsedTime === 0 ? "Press Start to begin" : "Game Paused"}
-              </p>
-              <button
-                onClick={toggleTimer}
-                className="px-[4vw] py-[1.5vh] rounded-xl bg-green-600 hover:bg-green-500 active:scale-95 font-bold text-white text-[clamp(0.9rem,2vh,1.1rem)] shadow-lg transition-all duration-150"
-              >
-                {elapsedTime === 0 ? "Start Game" : "Resume"}
-              </button>
+              {isCompleted ? (
+                <>
+                  <div className="text-[clamp(1.5rem,5vh,3rem)] font-bold text-slate-200">🏁</div>
+                  <p className="text-[clamp(0.9rem,2.5vh,1.25rem)] text-slate-100 font-semibold">
+                    Finished in {formatTime(elapsedTime)}
+                  </p>
+                  <p className="text-[clamp(0.8rem,2vh,1.1rem)] text-slate-400">
+                    Waiting for the next puzzle...
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="text-[clamp(1.5rem,5vh,3rem)] font-bold text-slate-200">
+                    {elapsedTime === 0 ? "🧩" : "⏸️"}
+                  </div>
+                  <p className="text-[clamp(0.9rem,2.5vh,1.25rem)] text-slate-300 font-medium">
+                    {elapsedTime === 0 ? "Press Start to begin" : "Game Paused"}
+                  </p>
+                  <button
+                    onClick={toggleTimer}
+                    className="px-[4vw] py-[1.5vh] rounded-xl bg-green-600 hover:bg-green-500 active:scale-95 font-bold text-white text-[clamp(0.9rem,2vh,1.1rem)] shadow-lg transition-all duration-150"
+                  >
+                    {elapsedTime === 0 ? "Start Game" : "Resume"}
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -740,12 +845,6 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
 
           {/* Action Buttons */}
           <div className="flex flex-col gap-[1vh] w-full">
-            <button
-              onClick={clearBoard}
-              className="w-full px-[2vw] py-[0.8vh] rounded-lg bg-red-600 hover:bg-red-500 active:scale-95 font-semibold text-white text-[clamp(0.6rem,1.3vh,0.8rem)] transition-all duration-150"
-            >
-              Clear Board
-            </button>
             <button
               onClick={onModeSwitch}
               className="w-full px-[2vw] py-[0.8vh] rounded-lg bg-violet-600 hover:bg-violet-500 active:scale-95 font-semibold text-white text-[clamp(0.6rem,1.3vh,0.8rem)] transition-all duration-150"
