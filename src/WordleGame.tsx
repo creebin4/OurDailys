@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import validWordsText from "./assets/valid-wordle-words.txt?raw";
 import { fetchWordleAnswer, WordleData } from "./wordleApi";
 
@@ -52,6 +52,22 @@ const statusColors: Record<LetterStatus, string> = {
   absent: "bg-zinc-800 border-zinc-800",
   present: "bg-amber-600 border-amber-600",
   correct: "bg-green-700 border-green-700",
+};
+
+const keyboardStatusColors: Record<LetterStatus, string> = {
+  "": "bg-slate-700 text-white",
+  absent: "bg-zinc-800 text-white",
+  present: "bg-amber-600 text-white",
+  correct: "bg-green-700 text-white",
+};
+
+const KEYBOARD_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
+
+const STATUS_PRIORITY: Record<LetterStatus, number> = {
+  "": 0,
+  absent: 1,
+  present: 2,
+  correct: 3,
 };
 
 interface WordleGameProps {
@@ -334,6 +350,24 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
     ? lastSyncedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : null;
 
+  const letterStatuses = useMemo<Record<string, LetterStatus>>(() => {
+    const map: Record<string, LetterStatus> = {};
+    for (let row = 0; row < NUM_ROWS; row += 1) {
+      for (let col = 0; col < NUM_COLS; col += 1) {
+        const letter = board[row][col];
+        const status = statuses[row][col];
+        if (!letter || !status) {
+          continue;
+        }
+        const prevStatus = map[letter];
+        if (!prevStatus || STATUS_PRIORITY[status] > STATUS_PRIORITY[prevStatus]) {
+          map[letter] = status;
+        }
+      }
+    }
+    return map;
+  }, [board, statuses]);
+
   return (
     <>
       <header className="text-center shrink-0">
@@ -394,7 +428,25 @@ export default function WordleGame({ onModeSwitch }: WordleGameProps) {
       </section>
 
       {/* Controls */}
-      <div className="flex flex-col items-center gap-[1vh] shrink-0 w-full">
+      <div className="flex flex-col items-center gap-[1.25vh] shrink-0 w-full mt-[2vh] px-[2vw]">
+        <div className="w-full max-w-[min(55vh,560px)] flex flex-col gap-[0.75vh]">
+          {KEYBOARD_ROWS.map((row) => (
+            <div className="flex justify-center gap-[0.5vw]" key={row} aria-hidden="true">
+              {row.split("").map((letter) => {
+                const status = letterStatuses[letter] ?? "";
+                const colorClass = keyboardStatusColors[status];
+                return (
+                  <div
+                    className={`flex items-center justify-center rounded-md font-semibold uppercase text-[clamp(0.75rem,2vh,1rem)] shadow-md w-[clamp(2rem,4vw,2.75rem)] aspect-square ${colorClass}`}
+                    key={letter}
+                  >
+                    {letter}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
         <div className="flex flex-wrap justify-center gap-[1vw]">
           <button
             className="px-[3vw] py-[1vh] rounded-full bg-violet-600 hover:bg-violet-500 active:scale-95 font-semibold text-white shadow-lg transition-all duration-150 text-[clamp(0.75rem,2vh,1rem)]"

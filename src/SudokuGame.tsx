@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchSudokuPuzzle } from "./sudokuApi";
 
 // Types
@@ -231,6 +231,33 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
 
   const invalidCells = getInvalidCells();
 
+  const numberCompletionStatus = useMemo(() => {
+    const stats = Array.from({ length: 10 }, () => ({
+      count: 0,
+      rows: new Set<number>(),
+      cols: new Set<number>(),
+    }));
+
+    board.forEach((row, rowIndex) => {
+      row.forEach((cell, colIndex) => {
+        if (cell.value !== null) {
+          const entry = stats[cell.value];
+          entry.count += 1;
+          entry.rows.add(rowIndex);
+          entry.cols.add(colIndex);
+        }
+      });
+    });
+
+    const result: Record<number, boolean> = {};
+    for (let num = 1; num <= 9; num++) {
+      const entry = stats[num];
+      result[num] = entry.count === 9 && entry.rows.size === 9 && entry.cols.size === 9;
+    }
+
+    return result;
+  }, [board]);
+
   useEffect(() => {
     if (!solutionGrid || isCompleted) {
       return;
@@ -321,39 +348,39 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
             pointingNotes: new Set(cell.pointingNotes),
           }))
         );
-
-        selectedCells.forEach((key) => {
+        const selectedCellRefs = [...selectedCells].map((key) => {
           const { row, col } = parseKey(key);
-          if (newBoard[row][col].isGiven) return;
+          return { row, col, cell: newBoard[row][col] };
+        });
 
-          const cell = newBoard[row][col];
+        if (effectiveMode === "value") {
+          selectedCellRefs.forEach(({ row, col, cell }) => {
+            if (cell.isGiven) return;
 
-          if (effectiveMode === "value") {
             // Setting a value - preserve notes (they'll show again if value is deleted)
             const wasNull = cell.value === null;
             cell.value = cell.value === num ? null : num;
-            // Don't clear notes - preserve them for when value is removed
-            
+
             // If we just placed a value, remove pointing notes of that number from row/col/box
             if (wasNull && cell.value !== null) {
               const placedNum = cell.value;
               const boxStartRow = Math.floor(row / 3) * 3;
               const boxStartCol = Math.floor(col / 3) * 3;
-              
+
               // Remove from same row
               for (let c = 0; c < 9; c++) {
                 if (c !== col) {
                   newBoard[row][c].pointingNotes.delete(placedNum);
                 }
               }
-              
+
               // Remove from same column
               for (let r = 0; r < 9; r++) {
                 if (r !== row) {
                   newBoard[r][col].pointingNotes.delete(placedNum);
                 }
               }
-              
+
               // Remove from same 3x3 box
               for (let r = boxStartRow; r < boxStartRow + 3; r++) {
                 for (let c = boxStartCol; c < boxStartCol + 3; c++) {
@@ -363,32 +390,49 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
                 }
               }
             }
-          } else if (effectiveMode === "possible") {
-            // Toggle possible note - converts from pointing if it exists there
-            if (cell.value === null) {
-              if (cell.possibleNotes.has(num)) {
-                // Already a possible note, remove it
-                cell.possibleNotes.delete(num);
-              } else {
-                // Add as possible note, remove from pointing if present
-                cell.possibleNotes.add(num);
-                cell.pointingNotes.delete(num);
-              }
-            }
-          } else if (effectiveMode === "pointing") {
-            // Toggle pointing note - converts from possible if it exists there
-            if (cell.value === null) {
-              if (cell.pointingNotes.has(num)) {
-                // Already a pointing note, remove it
-                cell.pointingNotes.delete(num);
-              } else {
-                // Add as pointing note, remove from possible if present
-                cell.pointingNotes.add(num);
-                cell.possibleNotes.delete(num);
-              }
-            }
+          });
+          return newBoard;
+        }
+
+        const editableCells = selectedCellRefs.filter(({ cell }) => !cell.isGiven && cell.value === null);
+
+        if (effectiveMode === "possible") {
+          if (editableCells.length === 0) {
+            return newBoard;
           }
-        });
+
+          const allHaveNote = editableCells.every(({ cell }) => cell.possibleNotes.has(num));
+
+          editableCells.forEach(({ cell }) => {
+            if (allHaveNote) {
+              cell.possibleNotes.delete(num);
+            } else if (!cell.possibleNotes.has(num)) {
+              cell.possibleNotes.add(num);
+              cell.pointingNotes.delete(num);
+            }
+          });
+
+          return newBoard;
+        }
+
+        if (effectiveMode === "pointing") {
+          if (editableCells.length === 0) {
+            return newBoard;
+          }
+
+          const allHaveNote = editableCells.every(({ cell }) => cell.pointingNotes.has(num));
+
+          editableCells.forEach(({ cell }) => {
+            if (allHaveNote) {
+              cell.pointingNotes.delete(num);
+            } else if (!cell.pointingNotes.has(num)) {
+              cell.pointingNotes.add(num);
+              cell.possibleNotes.delete(num);
+            }
+          });
+
+          return newBoard;
+        }
 
         return newBoard;
       });
@@ -806,26 +850,33 @@ export default function SudokuGame({ onModeSwitch }: SudokuGameProps) {
             className="grid grid-cols-3 gap-0"
             style={{ border: "3px solid #64748b" }}
           >
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-              <button
-                key={num}
-                onClick={() => handleNumberClick(num)}
-                className="relative flex items-center justify-center transition-all duration-150"
-                style={{
-                  width: "clamp(2.5rem,6vh,4rem)",
-                  height: "clamp(2.5rem,6vh,4rem)",
-                  backgroundColor: selectedNumber === num ? "#a16207" : "#1e293b",
-                  borderRight: num % 3 !== 0 ? "2px solid #475569" : "none",
-                  borderBottom: num <= 6 ? "2px solid #475569" : "none",
-                }}
-              >
-                <span className={`text-[clamp(1rem,2.5vh,1.5rem)] font-bold ${
-                  selectedNumber === num ? "text-white" : "text-slate-200"
-                }`}>
-                  {num}
-                </span>
-              </button>
-            ))}
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => {
+              const isSelected = selectedNumber === num;
+              const isComplete = numberCompletionStatus[num] ?? false;
+              const buttonBg = isSelected ? "#a16207" : isComplete ? "#0f172a" : "#1e293b";
+              const buttonOpacity = isComplete && !isSelected ? 0.45 : 1;
+              const textColorClass = isSelected ? "text-white" : isComplete ? "text-slate-500" : "text-slate-200";
+
+              return (
+                <button
+                  key={num}
+                  onClick={() => handleNumberClick(num)}
+                  className="relative flex items-center justify-center transition-all duration-150"
+                  style={{
+                    width: "clamp(2.5rem,6vh,4rem)",
+                    height: "clamp(2.5rem,6vh,4rem)",
+                    backgroundColor: buttonBg,
+                    borderRight: num % 3 !== 0 ? "2px solid #475569" : "none",
+                    borderBottom: num <= 6 ? "2px solid #475569" : "none",
+                    opacity: buttonOpacity,
+                  }}
+                >
+                  <span className={`text-[clamp(1rem,2.5vh,1.5rem)] font-bold ${textColorClass}`}>
+                    {num}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           {/* Input Mode Toggle - styled as sudoku cells */}
